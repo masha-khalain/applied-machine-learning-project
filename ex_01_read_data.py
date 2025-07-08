@@ -1,7 +1,6 @@
 import numpy as np
-import pandas as pd  
+import pandas as pd
 from pathlib import Path
-import logging
 
 
 def load_data(data_path: Path) -> pd.DataFrame:
@@ -13,17 +12,20 @@ def load_data(data_path: Path) -> pd.DataFrame:
 
     Returns:
         pd.DataFrame: Preprocessed DataFrame with unlabeled data removed.
-
     Raises:
         FileNotFoundError: If the specified data file does not exist.
+        ValueError: If the data is empty after removing unlabeled data and dropping NaN values.
     """
-    if not data_path.exists():
-        raise FileNotFoundError(f"File {data_path} does not exis. Please download the data from the link provided in the README.md file.")
-    logging.info(f"Loading data from {data_path}")
-    data = pd.read_csv(data_path)
-    data = remove_unlabeled_data(data)
-    data.dropna(inplace=True)
-    return data
+    try: 
+        df = pd.read_csv(data_path)
+    except: 
+        raise FileNotFoundError
+    df = remove_unlabeled_data(df)
+    df.dropna(inplace = True)
+    df = df.apply(pd.to_numeric, errors='coerce')
+    if(df.empty == True or df.isnull().values.any()):
+        raise ValueError
+    return df
 
 def remove_unlabeled_data(data: pd.DataFrame) -> pd.DataFrame:
     """
@@ -35,7 +37,14 @@ def remove_unlabeled_data(data: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pd.DataFrame: DataFrame with unlabeled data removed.
     """
-    return data[data["labels"] != -1]
+
+    data.drop(data[data['labels'] == -1].index, inplace = True)
+    return data
+
+
+def jls_extract_def():
+    
+    return 
 
 
 def convert_to_np(data: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -51,19 +60,19 @@ def convert_to_np(data: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
             - exp_ids (np.ndarray): Array of experiment IDs
             - data (np.ndarray): Combined array of current and voltage features
     """
-    logging.info(f"Converting data to numpy array")
-    labels, exp_ids = data["labels"].values, data["exp_ids"].values
-    data = data.drop(columns=["labels", "exp_ids"])
+    # separate labels and experiment id
+    labels = data['labels'].to_numpy()
+    exp_ids = data['exp_ids'].to_numpy()
     
-    cols_v = data.columns[data.columns.str.startswith("V")]
-    cols_i = data.columns[data.columns.str.startswith("I")]
-    
-    current_data = data[cols_i].values
-    voltage_data = data[cols_v].values
+    #get current and voltage columns
+    current_col = [col for col in data.columns if col.startswith('I')]
+    voltage_col = [col for col in data.columns if col.startswith('V')]
+    current_data = data[current_col].to_numpy()
+    voltage_data = data[voltage_col].to_numpy()
 
-    data = np.stack([current_data, voltage_data], axis=2)
+    final = np.stack([current_data, voltage_data], axis = -1)
 
-    return labels, exp_ids, data
+    return labels, exp_ids, final
 
 
 def create_sliding_windows_first_dim(data: np.ndarray, sequence_length: int) -> np.ndarray:
@@ -75,9 +84,18 @@ def create_sliding_windows_first_dim(data: np.ndarray, sequence_length: int) -> 
         sequence_length (int): Length of each window
     
     Returns:
-        np.ndarray: Windowed data of shape (n_windows, sequence_length, timesteps, features)
+        np.ndarray: Windowed data of shape (n_windows, sequence_length*timesteps, features)
     """
-    raise NotImplementedError("This function is not implemented and not needed for exercise 5 & 6")
+    
+    n_samples, timesteps, features = data.shape
+    window_view = np.lib.stride_tricks.sliding_window_view(data, window_shape=(sequence_length,timesteps, features), axis=[0,1,2])
+
+    n_windows, z, y, seq_len, timesteps, features = window_view.shape
+
+    # Reshape from (n_windows, sequence_length, timesteps, features) -> (n_windows, sequence_length * timesteps, features)
+    reshaped = window_view.reshape(z*n_windows, seq_len * timesteps, y*features).copy()
+    
+    return reshaped
 
 def get_welding_data(path: Path, n_samples: int | None = None, return_sequences: bool = False, sequence_length: int = 100) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -97,33 +115,26 @@ def get_welding_data(path: Path, n_samples: int | None = None, return_sequences:
             - np.ndarray: Array of labels
             - np.ndarray: Array of experiment IDs
     """
-    np_file_path_data = path.parent / "data.npy"
-    np_file_path_labels = path.parent / "labels.npy"
-    np_file_path_exp_ids = path.parent / "exp_ids.npy"
+    try:
+        labels = np.load(path/"labels.npy")
+        exp_ids = np.load(path/"exp_ids.npy")
+        data = np.load(path/"data.npy")
+    except:
+        labels, exp_ids, data = convert_to_np(load_data(path))
+        np.save("labels", labels)
+        np.save("exp_ids", exp_ids)
+        np.save("data", data)
+    if type(n_samples) == int:
+        indices = np.random.choice(data.shape[0], size=n_samples, replace=False)
+        data = data[indices]
+        labels = labels[indices]
+        exp_ids = exp_ids[indices]
+    if return_sequences == True:
+        data = create_sliding_windows_first_dim(data, sequence_length)
+        # Using sliding_window_view
+        labels = np.lib.stride_tricks.sliding_window_view(labels, window_shape=sequence_length)
+        exp_ids = np.lib.stride_tricks.sliding_window_view(exp_ids, window_shape=sequence_length)
+    
 
-    if not np_file_path_data.exists() or not np_file_path_labels.exists() or not np_file_path_exp_ids.exists():
-        data = load_data(path)
-        labels, exp_ids, np_data = convert_to_np(data)
-        logging.info(f"Saving data to {np_file_path_data}")
-
-        np.save(np_file_path_data, np_data)
-        np.save(np_file_path_labels, labels)
-        np.save(np_file_path_exp_ids, exp_ids)
-
-    np_data = np.load(np_file_path_data)
-    labels = np.load(np_file_path_labels)
-    exp_ids = np.load(np_file_path_exp_ids)
-
-    if return_sequences:
-        np_data = create_sliding_windows_first_dim(np_data, sequence_length)
-        labels = np.repeat(labels.reshape(-1, 1), sequence_length, axis=1)[:-sequence_length + 1]
-        exp_ids = np.repeat(exp_ids.reshape(-1, 1), sequence_length, axis=1)[:-sequence_length + 1]
-
-    if n_samples is not None:
-        sample_idx = np.random.choice(np_data.shape[0], n_samples, replace=False)
-        logging.info(f"Sampling {n_samples} samples from {np_data.shape[0]}")
-        np_data = np_data[sample_idx]
-        labels = labels[sample_idx]
-        exp_ids = exp_ids[sample_idx]
-
-    return np_data, labels, exp_ids
+    return data, labels, exp_ids
+    pass
